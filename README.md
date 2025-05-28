@@ -1,129 +1,224 @@
-# AWS Network Firewall Deployment
+# Suricata Rule Generator Lambda
 
-## Overview
-
-This project provides automated deployment of AWS Network Firewall with a comprehensive set of security rules and monitoring capabilities. It enables centralized network protection for your VPCs with minimal setup and maintenance.
-
-![Architecture Diagram](images/aws-netfw-architecture.png)
-
-## Key Components
-
-- **AWS Network Firewall**: Managed network firewall service for VPC protection
-- **Stateful Rule Groups**: Deep packet inspection and filtering
-- **Stateless Rule Groups**: Basic packet filtering based on 5-tuple information
-- **CloudWatch Logs**: Logging and monitoring of network traffic
-- **CloudWatch Alarms**: Automated alerting for security events
-- **Custom Dashboards**: Visualization of security metrics and events
+This Lambda function automatically generates and updates Suricata rules for AWS Network Firewall to protect against data exfiltration (DLP) and common intrusion threats.
 
 ## Features
 
-- Centralized network security management
-- Protection against common network threats
-- Customizable rule sets for specific security requirements
-- Automated deployment via CloudFormation
-- Comprehensive logging and monitoring
-- Integration with existing security tools
+- **DLP Protection**: Detects and prevents sensitive data exfiltration
+  - Credit card numbers
+  - Social Security Numbers
+  - Sensitive keywords in HTTP requests
+  - Large data transfers on non-standard ports
+  - Base64 encoded data exfiltration
+
+- **Intrusion Prevention**: Protects against common attack vectors
+  - SQL injection attempts
+  - Cross-site scripting (XSS)
+  - Command injection
+  - Path traversal
+  - Malware and C2 traffic detection
+  - DNS tunneling
+  - Protocol anomalies
+  - Brute force attempts
+  - Port scanning
+
+## Configuration
+
+The Lambda function can be configured using environment variables:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `RULE_GROUP_NAME` | Name of the Network Firewall rule group | `suricata-managed-rules` |
+| `RULE_GROUP_CAPACITY` | Capacity of the rule group | `1000` |
+| `UPDATE_FIREWALL` | Whether to update the firewall | `false` |
+| `ORGANIZATION_DOMAINS` | Comma-separated list of organization domains | `example.com,example.org` |
+| `SENSITIVE_KEYWORDS` | Comma-separated list of sensitive keywords | `confidential,secret,restricted` |
+| `FIREWALL_POLICY_ARN` | ARN of the firewall policy to update | `` |
+| `DLP_SID_START` | Starting SID for DLP rules | `1000000` |
+| `IPS_SID_START` | Starting SID for IPS rules | `2000000` |
+
+## Local Rule Generation
+
+To generate rules locally without AWS dependencies:
+
+```bash
+python3 generate_rules.py
+```
+
+This will create a file named `generated_suricata_rules.rules` with all the Suricata rules.
 
 ## Deployment
 
 ### Prerequisites
 
-- AWS CLI installed and configured
-- A VPC with at least two subnets in different Availability Zones
-- Appropriate IAM permissions to create Network Firewall resources
+- AWS CLI configured with appropriate permissions
+- AWS Network Firewall deployed in your VPC
 
-### Deploy using CloudFormation
+### Deployment Steps
 
-```bash
-aws cloudformation deploy \
-  --template-file templates/network-firewall.yaml \
-  --stack-name aws-network-firewall \
-  --parameter-overrides \
-      VpcId=vpc-xxxxxxxx \
-      SubnetIds=subnet-xxxxxxxx,subnet-yyyyyyyy \
-  --capabilities CAPABILITY_IAM
+1. Package the Lambda function:
+   ```bash
+   pip install -r requirements.txt -t .
+   zip -r suricata_rule_generator.zip .
+   ```
+
+2. Create the Lambda function:
+   ```bash
+   aws lambda create-function \
+     --function-name suricata-rule-generator \
+     --runtime python3.9 \
+     --handler suricata_rule_generator.lambda_handler \
+     --zip-file fileb://suricata_rule_generator.zip \
+     --role arn:aws:iam::<account-id>:role/lambda-network-firewall-role
+   ```
+
+3. Set up environment variables:
+   ```bash
+   aws lambda update-function-configuration \
+     --function-name suricata-rule-generator \
+     --environment "Variables={RULE_GROUP_NAME=suricata-managed-rules,UPDATE_FIREWALL=true,FIREWALL_POLICY_ARN=arn:aws:network-firewall:<region>:<account-id>:firewall-policy/<policy-name>}"
+   ```
+
+4. Set up a scheduled trigger (optional):
+   ```bash
+   aws events put-rule \
+     --name daily-suricata-rule-update \
+     --schedule-expression "rate(1 day)"
+   
+   aws events put-targets \
+     --rule daily-suricata-rule-update \
+     --targets "Id"="1","Arn"="arn:aws:lambda:<region>:<account-id>:function:suricata-rule-generator"
+   ```
+
+## Integration with AWS Network Firewall
+
+This Lambda function can:
+
+1. Create a new stateful rule group with generated Suricata rules
+2. Update an existing rule group with new rules
+3. Add the rule group to a firewall policy if not already present
+
+## IAM Permissions
+
+The Lambda function requires the following permissions:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "network-firewall:CreateRuleGroup",
+        "network-firewall:UpdateRuleGroup",
+        "network-firewall:DescribeRuleGroup",
+        "network-firewall:DescribeFirewallPolicy",
+        "network-firewall:UpdateFirewallPolicy"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+      ],
+      "Resource": "arn:aws:logs:*:*:*"
+    }
+  ]
+}
 ```
 
-### Manual Deployment
+## Applying Rules to HTTPS Traffic
 
-1. Open AWS CloudFormation console
-2. Create new stack with `templates/network-firewall.yaml`
-3. Enter required parameters
-4. Create stack
+The default rules primarily target unencrypted HTTP traffic. To apply DLP and IPS protection to encrypted HTTPS traffic, additional configuration is required:
 
-## Post-Deployment Steps
+### TLS Inspection Approaches
 
-1. Verify Network Firewall deployment in the AWS Console
-2. Update route tables to direct traffic through the firewall endpoints
-3. Test firewall rules with sample traffic
-4. Subscribe to SNS topics for alerts
+#### 1. Full TLS Inspection (SSL Termination)
 
-## Parameters
+For comprehensive inspection of encrypted traffic:
 
-- `VpcId`: VPC where the Network Firewall will be deployed
-- `SubnetIds`: Subnets for Network Firewall endpoints (at least one per AZ)
-- `LogRetentionDays`: Number of days to retain logs (default: 30)
-- `AlertEmail`: Email address for security alerts
-
-## Architecture Details
-
-The AWS Network Firewall is deployed with endpoints in multiple subnets across availability zones. Traffic is routed through these endpoints using VPC route tables. The firewall applies both stateful and stateless rules to inspect and filter traffic based on configured policies.
-
-## Security Considerations
-
-- Network Firewall uses least-privilege IAM permissions
-- All traffic logs are encrypted at rest
-- Firewall rules follow security best practices
-- Regular rule updates are recommended to address new threats
-
-## Troubleshooting
-
-- Check CloudWatch Logs for firewall activity
-- Verify route tables are correctly configured
-- Ensure security groups allow necessary traffic
-- Review Network Firewall rule evaluation order
-
-## License
-
-This solution is licensed under the MIT License. See the LICENSE file for details.
-## Suricata Rules for Network Protection
-
-This project includes a Lambda function that generates comprehensive Suricata rules for AWS Network Firewall:
-
-- **DLP Protection**: Prevents sensitive data exfiltration
-  - Credit card numbers
-  - Social Security Numbers
-  - Sensitive keywords
-  - Large data transfers
-  - Base64 encoded data
-
-- **Intrusion Prevention**: Protects against common attacks
-  - SQL injection
-  - Cross-site scripting (XSS)
-  - Command injection
-  - Path traversal
-  - Malware detection
-  - DNS tunneling
-  - Brute force attempts
-  - Port scanning
-
-### Applying Rules to HTTPS Traffic
-
-For encrypted traffic protection, the following approaches are available:
-
-1. **TLS Inspection**: Full decryption and inspection of HTTPS traffic
-2. **SNI-Based Filtering**: Domain filtering without decryption
-3. **Certificate Validation**: Monitoring for suspicious certificates
-
-See the [Lambda README](lambda/README.md) for detailed implementation guidance.
-
-### Generating Rules
-
-To generate Suricata rules locally:
-
-```bash
-cd lambda
-python3 generate_rules.py
+```
+alert tls any any -> any any (msg:"TLS Inspection Enabled"; flow:established; tls.cert_subject; content:"example.com"; nocase; sid:3000000; rev:1;)
 ```
 
-This creates a `generated_suricata_rules.rules` file that can be imported into AWS Network Firewall.
+**Implementation Requirements:**
+- Configure AWS Network Firewall with TLS inspection capabilities
+- Deploy trusted certificates to clients
+- Set up certificate management infrastructure
+
+**AWS Implementation:**
+```yaml
+# CloudFormation snippet for TLS inspection configuration
+TLSInspectionConfiguration:
+  Type: AWS::NetworkFirewall::TLSInspectionConfiguration
+  Properties:
+    TLSInspectionConfigurationName: tls-inspection-config
+    CertificateAuthority:
+      CertificateArn: !Ref CertificateArn
+```
+
+#### 2. SNI-Based Filtering
+
+For basic filtering without decryption:
+
+```
+alert tls any any -> any any (msg:"Suspicious TLS SNI"; flow:established,to_server; tls.sni; pcre:"/suspicious-domain\.com/i"; sid:3000001; rev:1;)
+```
+
+**Benefits:**
+- No decryption required
+- Preserves privacy
+- Lower performance impact
+
+**Limitations:**
+- Cannot inspect encrypted payload
+- Limited to domain-based filtering
+
+#### 3. Certificate Validation
+
+Monitor for suspicious certificates:
+
+```
+alert tls any any -> any any (msg:"Self-signed Certificate"; flow:established; tls.cert_issuer; content:!"Trusted CA"; nocase; sid:3000002; rev:1;)
+```
+
+### Implementation Architecture
+
+To implement HTTPS inspection with AWS Network Firewall:
+
+1. **Deployment Architecture:**
+   ```
+   Internet Gateway → Network Firewall (TLS Inspection) → Application Load Balancer → EC2/ECS
+   ```
+
+2. **AWS Service Integration:**
+   - AWS Certificate Manager for certificate management
+   - AWS Secrets Manager for private key storage
+   - CloudWatch for monitoring inspection events
+
+### Best Practices
+
+1. **Privacy and Compliance:**
+   - Document TLS inspection policies
+   - Ensure compliance with relevant regulations (GDPR, HIPAA, etc.)
+   - Consider data residency requirements
+
+2. **Performance Considerations:**
+   - TLS inspection adds processing overhead
+   - Consider selective decryption for sensitive traffic only
+   - Monitor Network Firewall performance metrics
+
+3. **Security Measures:**
+   - Secure private keys used for decryption
+   - Implement certificate rotation policies
+   - Restrict access to TLS inspection configuration
+
+4. **Monitoring:**
+   - Enable detailed logging for Network Firewall
+   - Create CloudWatch alarms for critical events
+   - Implement automated response for high-severity alerts
+
+By implementing these approaches, you can extend DLP and IPS protection to encrypted HTTPS traffic while balancing security, performance, and compliance requirements.
